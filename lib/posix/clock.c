@@ -107,6 +107,66 @@ int clock_settime(clockid_t clock_id, const struct timespec *tp)
 }
 
 /**
+ * @brief Suspend execution for a nanosecond interval, or
+ * until some absolute time relative to the specified clock.
+ *
+ * See IEEE 1003.1
+ */
+int clock_nanosleep(clockid_t clock_id, int flags,
+					const struct timespec *rqtp, struct timespec *rmtp)
+{
+	uint64_t ns;
+	uint64_t us;
+	const bool update_rmtp = rmtp != NULL;
+
+	if (clock_id != CLOCK_REALTIME && clock_id != CLOCK_MONOTONIC) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	if ((flags & TIMER_ABSTIME) != TIMER_ABSTIME) {
+		return nanosleep(rqtp, rmtp);
+	}
+
+	if (rqtp == NULL) {
+		errno = EFAULT;
+		return -1;
+	}
+
+	if (rqtp->tv_sec < 0 || rqtp->tv_nsec < 0
+		|| rqtp->tv_nsec >= NSEC_PER_SEC) {
+		errno = EINVAL;
+		return -1;
+	}
+
+  ns = rqtp->tv_sec * NSEC_PER_SEC + rqtp->tv_nsec;
+  if (clock_id == CLOCK_REALTIME) {
+    k_spinlock_key_t key;
+    key = k_spin_lock(&rt_clock_base_lock);
+    ns -= rt_clock_base.tv_sec * NSEC_PER_SEC + rt_clock_base.tv_nsec;
+    k_spin_unlock(&rt_clock_base_lock, key);
+  }
+
+	uint64_t uptime_ns = k_ticks_to_ns_floor64(k_uptime_ticks());
+	if (ns <= uptime_ns) {
+		goto do_rmtp_update;
+	}
+
+	us = DIV_ROUND_UP(ns, NSEC_PER_USEC);
+	do {
+		us = k_sleep(K_TIMEOUT_ABS_US(us));
+	} while (us != 0);
+
+do_rmtp_update:
+	if (update_rmtp) {
+		rmtp->tv_sec = 0;
+		rmtp->tv_nsec = 0;
+	}
+
+	return 0;
+}
+
+/**
  * @brief Get current real time.
  *
  * See IEEE 1003.1
