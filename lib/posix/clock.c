@@ -113,7 +113,7 @@ int clock_settime(clockid_t clock_id, const struct timespec *tp)
  * See IEEE 1003.1
  */
 int clock_nanosleep(clockid_t clock_id, int flags,
-					const struct timespec *rqtp, struct timespec *rmtp)
+					          const struct timespec *rqtp, struct timespec *rmtp)
 {
 	uint64_t ns;
 	uint64_t us;
