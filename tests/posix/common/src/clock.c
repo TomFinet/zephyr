@@ -123,3 +123,176 @@ ZTEST(posix_apis, test_realtime)
 	zassert_true(rts.tv_nsec >= tv.tv_usec * NSEC_PER_USEC,
 			"gettimeofday didn't provide correct result");
 }
+
+ZTEST(posix_apis, test_clock_nanosleep_errors_errno) {
+	struct timespec rem = {};
+	struct timespec req = {};
+
+	/*
+	 * invalid parameters
+	 */
+	zassert_equal(clock_nanosleep(
+		CLOCK_MONOTONIC, TIMER_ABSTIME, NULL, NULL), -1);
+	zassert_equal(errno, EFAULT);
+
+	/* invalid clock */
+	zassert_equal(clock_nanosleep(
+		-1, TIMER_ABSTIME, &req, &rem), -1);
+	zassert_equal(errno, EINVAL);
+
+	/* NULL request */
+	errno = 0;
+	zassert_equal(clock_nanosleep(
+		CLOCK_MONOTONIC, TIMER_ABSTIME, NULL, &rem), -1);
+	zassert_equal(errno, EFAULT);
+	/* Expect rem to be the same when function returns */
+	zassert_equal(rem.tv_sec, 0, "actual: %d expected: %d", rem.tv_sec, 0);
+	zassert_equal(rem.tv_nsec, 0, "actual: %d expected: %d", rem.tv_nsec, 0);
+
+	/* negative times */
+	errno = 0;
+	req = (struct timespec){.tv_sec = -1, .tv_nsec = 0};
+	zassert_equal(clock_nanosleep(
+		CLOCK_MONOTONIC, TIMER_ABSTIME, &req, NULL), -1);
+	zassert_equal(errno, EINVAL);
+
+	errno = 0;
+	req = (struct timespec){.tv_sec = 0, .tv_nsec = -1};
+	zassert_equal(clock_nanosleep(
+		CLOCK_MONOTONIC, TIMER_ABSTIME, &req, NULL), -1);
+	zassert_equal(errno, EINVAL);
+
+	errno = 0;
+	req = (struct timespec){.tv_sec = -1, .tv_nsec = -1};
+	zassert_equal(clock_nanosleep(
+		CLOCK_MONOTONIC, TIMER_ABSTIME, &req, NULL), -1);
+	zassert_equal(errno, EINVAL);
+
+	/* nanoseconds too high */
+	errno = 0;
+	req = (struct timespec){.tv_sec = 0, .tv_nsec = 1000000000};
+	zassert_equal(clock_nanosleep(
+		CLOCK_MONOTONIC, TIMER_ABSTIME, &req, NULL), -1);
+	zassert_equal(errno, EINVAL);
+
+	/*
+	 * Valid parameters
+	 */
+	errno = 0;
+
+	/* Happy path, plus make sure the const input is unmodified */
+	req = (struct timespec){.tv_sec = 1, .tv_nsec = 1};
+	zassert_equal(clock_nanosleep(
+		CLOCK_MONOTONIC, TIMER_ABSTIME, &req, NULL), 0);
+	zassert_equal(errno, 0);
+	zassert_equal(req.tv_sec, 1);
+	zassert_equal(req.tv_nsec, 1);
+
+	/* Sleep for 0.0 s. Expect req & rem to be the same when function returns */
+	zassert_equal(clock_nanosleep(
+		CLOCK_MONOTONIC, TIMER_ABSTIME, &req, &rem), 0);
+	zassert_equal(errno, 0);
+	zassert_equal(rem.tv_sec, 0, "actual: %d expected: %d", rem.tv_sec, 0);
+	zassert_equal(rem.tv_nsec, 0, "actual: %d expected: %d", rem.tv_nsec, 0);
+
+	/*
+	 * req and rem point to the same timespec
+	 *
+	 * Normative spec says they may be the same.
+	 * Expect rem to be zero after returning.
+	 */
+	req = (struct timespec){.tv_sec = 0, .tv_nsec = 1};
+	zassert_equal(clock_nanosleep(
+		CLOCK_MONOTONIC, TIMER_ABSTIME, &req, &req), 0);
+	zassert_equal(errno, 0);
+	zassert_equal(req.tv_sec, 0, "actual: %d expected: %d", req.tv_sec, 0);
+	zassert_equal(req.tv_nsec, 0, "actual: %d expected: %d", req.tv_nsec, 0);
+
+	/* Absolute timeout in the past. */
+	clock_gettime(CLOCK_MONOTONIC, &req);
+	zassert_equal(clock_nanosleep(
+		CLOCK_MONOTONIC, TIMER_ABSTIME, &req, NULL), 0);
+	zassert_equal(rem.tv_sec, 0, "actual: %d expected: %d", rem.tv_sec, 0);
+	zassert_equal(rem.tv_nsec, 0, "actual: %d expected: %d", rem.tv_nsec, 0);
+
+	/* Absolute timeout in the past
+	 * relative to the realtime clock. */
+	clock_gettime(CLOCK_REALTIME, &req);
+	zassert_equal(clock_nanosleep(
+		CLOCK_REALTIME, TIMER_ABSTIME, &req, NULL), 0);
+	zassert_equal(rem.tv_sec, 0, "actual: %d expected: %d", rem.tv_sec, 0);
+	zassert_equal(rem.tv_nsec, 0, "actual: %d expected: %d", rem.tv_nsec, 0);
+}
+
+static void common(clockid_t clock_id, const uint32_t s, uint32_t ns)
+{
+	int r;
+	uint64_t now;
+	struct timespec rem = {0, 0};
+	struct timespec req = {s, ns};
+
+	errno = 0;
+	r = clock_nanosleep(clock_id, TIMER_ABSTIME, &req, &rem);
+	now = k_cycle_get_64();
+
+	zassert_equal(r, 0, "actual: %d expected: %d", r, 0);
+	zassert_equal(errno, 0, "actual: %d expected: %d", errno, 0);
+	zassert_equal(req.tv_sec, s, "actual: %d expected: %d", req.tv_sec, s);
+	zassert_equal(req.tv_nsec, ns, "actual: %d expected: %d", req.tv_nsec, ns);
+	zassert_equal(rem.tv_sec, 0, "actual: %d expected: %d", rem.tv_sec, 0);
+	zassert_equal(rem.tv_nsec, 0, "actual: %d expected: %d", rem.tv_nsec, 0);
+
+	uint64_t actual_ns = k_cyc_to_ns_ceil64(now);
+	uint64_t exp_ns = (uint64_t)s * NSEC_PER_SEC + ns;
+	/* round up to the nearest microsecond for k_busy_wait() */
+	exp_ns = DIV_ROUND_UP(exp_ns, NSEC_PER_USEC) * NSEC_PER_USEC;
+
+	/* lower bounds check */
+	zassert_true(actual_ns >= exp_ns,
+		"actual: %llu expected: %llu", actual_ns, exp_ns);
+
+	/* TODO: Upper bounds check when hr timers are available */
+}
+
+ZTEST(posix_apis, test_clock_nanosleep_execution)
+{
+	/* sleep until absolute 1s + 1ns */
+	common(CLOCK_MONOTONIC, 1, 1);
+
+	/* sleep until absolute 1s + 1us */
+	common(CLOCK_MONOTONIC, 1, 1000);
+
+	/* sleep for 500000000ns */
+	common(CLOCK_MONOTONIC, 1, 500000000);
+
+	/* sleep until absolute 2s */
+	common(CLOCK_MONOTONIC, 2, 0);
+
+	/* sleep until absolute 2s + 1ns */
+	common(CLOCK_MONOTONIC, 2, 1);
+
+	/* sleep until absolute 2s + 1us + 1ns */
+	common(CLOCK_MONOTONIC, 2, 1001);
+
+	/* set realtime clock base to 1s */
+	const struct timespec ts = {1, 0};
+	clock_settime(CLOCK_REALTIME, &ts);
+
+	/* absolute sleep until realtime 4s + 1ns */
+	common(CLOCK_REALTIME, ts.tv_sec + 3, 1);
+
+	/* absolute sleep until realtime 4s + 1us */
+	common(CLOCK_REALTIME, ts.tv_sec + 3, 1000);
+
+	/* absolute sleep until realtime 4s + 500000000ns */
+	common(CLOCK_REALTIME, ts.tv_sec + 3, 500000000);
+
+	/* absolute sleep until realtime 5s */
+	common(CLOCK_REALTIME, ts.tv_sec + 4, 0);
+
+	/* absolute sleep until realtime 5s + 1ns */
+	common(CLOCK_REALTIME, ts.tv_sec + 4, 1);
+
+	/* absolute sleep until realtime 5s + 1us + 1ns */
+	common(CLOCK_REALTIME, ts.tv_sec + 4, 1001);
+}
